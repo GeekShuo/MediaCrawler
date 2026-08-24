@@ -125,7 +125,8 @@ class BrowserLauncher:
         args = [
             browser_path,
             f"--remote-debugging-port={debug_port}",
-            "--remote-debugging-address=0.0.0.0",  # Allow remote access
+            # [video_kb patch] 仅监听本机回环，0.0.0.0 会把浏览器调试口暴露给局域网
+            "--remote-debugging-address=127.0.0.1",
             "--no-first-run",
             "--no-default-browser-check",
             "--disable-background-timer-throttling",

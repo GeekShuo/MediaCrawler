@@ -30,6 +30,7 @@ from tenacity import (
     retry_if_not_exception_type,
     stop_after_attempt,
     wait_fixed,
+    wait_random,
 )
 from tools.httpx_util import make_async_client
 
@@ -126,7 +127,8 @@ class XiaoHongShuClient(AbstractApiClient, ProxyRefreshMixin):
 
     @retry(
         stop=stop_after_attempt(3),
-        wait=wait_fixed(1),
+        # [video_kb patch] 固定 1s 重试 -> 1~4s 随机退避，削掉机器节奏
+        wait=wait_fixed(1) + wait_random(0, 3),
         retry=retry_if_not_exception_type(
             (NoteNotFoundError, IPBlockError, PlatformAccessError)
         ),
@@ -711,7 +713,8 @@ class XiaoHongShuClient(AbstractApiClient, ProxyRefreshMixin):
 
     @retry(
         stop=stop_after_attempt(3),
-        wait=wait_fixed(1),
+        # [video_kb patch] 随机退避
+        wait=wait_fixed(1) + wait_random(0, 3),
         retry=retry_if_not_exception_type(
             (RetryError, IPBlockError, PlatformAccessError)
         ),

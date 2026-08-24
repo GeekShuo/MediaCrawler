@@ -62,8 +62,9 @@ class XiaoHongShuCrawler(AbstractCrawler):
     def __init__(self) -> None:
         self.index_url = "https://www.rednote.com" if config.XHS_INTERNATIONAL else "https://www.xiaohongshu.com"
         self.cookie_urls = [self.index_url]
-        # self.user_agent = utils.get_user_agent()
-        self.user_agent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+        # [video_kb patch] UA 与 client.py 请求头统一为 Chrome 137 / macOS，
+        # 避免 UA 多版本 + sec-ch-ua-platform 互相矛盾的指纹泄漏
+        self.user_agent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36"
         self.cdp_manager = None
         self.ip_proxy_pool = None  # Proxy IP pool for automatic proxy refresh
 
@@ -96,6 +97,13 @@ class XiaoHongShuCrawler(AbstractCrawler):
                 )
                 # stealth.min.js is a js script to prevent the website from detecting the crawler.
                 await self.browser_context.add_init_script(path="libs/stealth.min.js")
+
+            # [video_kb patch] CDP/标准模式统一补一层现代反检测脚本
+            # （旧 stealth.min.js 部分补丁已过时；CDP 新开的干净 Chrome 同样有指纹特征）
+            try:
+                await self.browser_context.add_init_script(path="libs/stealth_patch.js")
+            except Exception as e:
+                utils.logger.warning(f"[XiaoHongShuCrawler] stealth_patch 注入失败（忽略）: {e}")
 
             self.context_page = await self.browser_context.new_page()
             await self.context_page.goto(self.index_url)
@@ -141,6 +149,8 @@ class XiaoHongShuCrawler(AbstractCrawler):
         for keyword in config.KEYWORDS.split(","):
             source_keyword_var.set(keyword)
             utils.logger.info(f"[XiaoHongShuCrawler.search] Current search keyword: {keyword}")
+            # [video_kb patch] 搜索前先在页面上做点真人浏览动作，避免"零交互连打 API"
+            await utils.simulate_human_browsing(self.context_page)
             page = 1
             search_id = get_search_id()
             while (page - start_page + 1) * xhs_limit_count <= config.CRAWLER_MAX_NOTES_COUNT:
@@ -184,8 +194,9 @@ class XiaoHongShuCrawler(AbstractCrawler):
                     await self.batch_get_note_comments(note_ids, xsec_tokens)
 
                     # Sleep after each page navigation
-                    await asyncio.sleep(config.CRAWLER_MAX_SLEEP_SEC)
-                    utils.logger.info(f"[XiaoHongShuCrawler.search] Sleeping for {config.CRAWLER_MAX_SLEEP_SEC} seconds after page {page-1}")
+                    # [video_kb patch] 固定间隔 -> 拟人随机抖动，降低行为风控命中
+                    slept = await utils.human_sleep(config.CRAWLER_MAX_SLEEP_SEC)
+                    utils.logger.info(f"[XiaoHongShuCrawler.search] Slept {slept:.1f}s after page {page-1}")
                 except DataFetchError:
                     utils.logger.error("[XiaoHongShuCrawler.search] Get note detail error")
                     break
@@ -320,8 +331,9 @@ class XiaoHongShuCrawler(AbstractCrawler):
                 note_detail.update({"xsec_token": xsec_token, "xsec_source": xsec_source})
 
                 # Sleep after fetching note detail
-                await asyncio.sleep(config.CRAWLER_MAX_SLEEP_SEC)
-                utils.logger.info(f"[get_note_detail_async_task] Sleeping for {config.CRAWLER_MAX_SLEEP_SEC} seconds after fetching note {note_id}")
+                # [video_kb patch] 拟人随机抖动
+                slept = await utils.human_sleep(config.CRAWLER_MAX_SLEEP_SEC)
+                utils.logger.info(f"[get_note_detail_async_task] Slept {slept:.1f}s after note {note_id}")
 
                 return note_detail
 
@@ -364,8 +376,9 @@ class XiaoHongShuCrawler(AbstractCrawler):
         """Get note comments with keyword filtering and quantity limitation"""
         async with semaphore:
             utils.logger.info(f"[XiaoHongShuCrawler.get_comments] Begin get note id comments {note_id}")
-            # Use fixed crawling interval
-            crawl_interval = config.CRAWLER_MAX_SLEEP_SEC
+            # [video_kb patch] 评论抓取间隔同样加抖动（原固定值）
+            crawl_interval = random.uniform(config.CRAWLER_MAX_SLEEP_SEC,
+                                            config.CRAWLER_MAX_SLEEP_SEC * 2)
             await self.xhs_client.get_note_all_comments(
                 note_id=note_id,
                 xsec_token=xsec_token,
@@ -396,9 +409,9 @@ class XiaoHongShuCrawler(AbstractCrawler):
                 "pragma": "no-cache",
                 "priority": "u=1, i",
                 "referer": f"{self.index_url}/",
-                "sec-ch-ua": '"Chromium";v="136", "Google Chrome";v="136", "Not.A/Brand";v="99"',
+                "sec-ch-ua": '"Chromium";v="137", "Google Chrome";v="137", "Not.A/Brand";v="99"',
                 "sec-ch-ua-mobile": "?0",
-                "sec-ch-ua-platform": '"Windows"',
+                "sec-ch-ua-platform": '"macOS"',
                 "sec-fetch-dest": "empty",
                 "sec-fetch-mode": "cors",
                 "sec-fetch-site": "same-site",
@@ -429,16 +442,14 @@ class XiaoHongShuCrawler(AbstractCrawler):
                 accept_downloads=True,
                 headless=headless,
                 proxy=playwright_proxy,  # type: ignore
-                viewport={
-                    "width": 1920,
-                    "height": 1080
-                },
+                # [video_kb patch] 随机真实分辨率，避免固定 1920x1080 指纹
+                viewport=utils.random_viewport(),
                 user_agent=user_agent,
             )
             return browser_context
         else:
             browser = await chromium.launch(headless=headless, proxy=playwright_proxy)  # type: ignore
-            browser_context = await browser.new_context(viewport={"width": 1920, "height": 1080}, user_agent=user_agent)
+            browser_context = await browser.new_context(viewport=utils.random_viewport(), user_agent=user_agent)
             return browser_context
 
     async def launch_browser_with_cdp(
